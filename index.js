@@ -41,6 +41,7 @@ async function getLotSize(instId) {
 
   lotCache[instId] = { lotSz, minSz, ts: Date.now() };
   console.log(`Lot size loaded: ${instId} | lotSz=${lotSz} | minSz=${minSz}`);
+
   return lotCache[instId];
 }
 
@@ -50,7 +51,7 @@ function normalizeQty(qty, lotSz, minSz) {
   return q;
 }
 
-// ===== PLACE ENTRY =====
+// ===== ENTRY =====
 async function placeEntry(payload) {
   const ts = new Date().toISOString();
   const path = "/api/v5/trade/order";
@@ -86,10 +87,12 @@ async function placeEntry(payload) {
   return { result: await res.json(), finalQty, posSide };
 }
 
-// ===== PLACE ALGO (TP or SL) =====
-async function placeAlgo({ instId, posSide, side, triggerPx, sz }) {
+// ===== STOP LOSS ALGO =====
+async function placeSL({ instId, posSide, slPx, sz }) {
   const ts = new Date().toISOString();
   const path = "/api/v5/trade/order-algo";
+
+  const side = posSide === "long" ? "sell" : "buy";
 
   const bodyObj = {
     instId,
@@ -97,8 +100,43 @@ async function placeAlgo({ instId, posSide, side, triggerPx, sz }) {
     side,
     posSide,
     ordType: "conditional",
-    triggerPx: triggerPx.toString(),
-    orderPx: "-1",
+    slTriggerPx: slPx.toString(),
+    slOrderPx: "-1",
+    sz: sz.toString()
+  };
+
+  const body = JSON.stringify(bodyObj);
+
+  const res = await fetch(OKX_BASE_URL + path, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "OK-ACCESS-KEY": OKX_API_KEY,
+      "OK-ACCESS-SIGN": signOKX(ts, "POST", path, body),
+      "OK-ACCESS-TIMESTAMP": ts,
+      "OK-ACCESS-PASSPHRASE": OKX_API_PASSPHRASE
+    },
+    body
+  });
+
+  return await res.json();
+}
+
+// ===== TAKE PROFIT ALGO =====
+async function placeTP({ instId, posSide, tpPx, sz }) {
+  const ts = new Date().toISOString();
+  const path = "/api/v5/trade/order-algo";
+
+  const side = posSide === "long" ? "sell" : "buy";
+
+  const bodyObj = {
+    instId,
+    tdMode: "cross",
+    side,
+    posSide,
+    ordType: "conditional",
+    tpTriggerPx: tpPx.toString(),
+    tpOrderPx: "-1",
     sz: sz.toString()
   };
 
@@ -137,26 +175,23 @@ app.post("/webhook", async (req, res) => {
       return res.json({ ok: false, entry: result });
     }
 
-    // ===== SL / TP (RDB1.2 STYLE – ATR BASED FROM PINE) =====
+    // ===== SL =====
     if (d.sl) {
-      const slSide = posSide === "long" ? "sell" : "buy";
-      const slRes = await placeAlgo({
+      const slRes = await placeSL({
         instId: d.instId,
         posSide,
-        side: slSide,
-        triggerPx: d.sl,
+        slPx: d.sl,
         sz: finalQty
       });
       console.log("SL:", slRes);
     }
 
+    // ===== TP1 =====
     if (d.tp1) {
-      const tpSide = posSide === "long" ? "sell" : "buy";
-      const tpRes = await placeAlgo({
+      const tpRes = await placeTP({
         instId: d.instId,
         posSide,
-        side: tpSide,
-        triggerPx: d.tp1,
+        tpPx: d.tp1,
         sz: finalQty
       });
       console.log("TP1:", tpRes);
