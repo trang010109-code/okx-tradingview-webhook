@@ -21,13 +21,26 @@ app.get("/", (req, res) => {
   res.send("OKX Webhook Server is running");
 });
 
-// ===== SIGN FUNCTION =====
+//Phong Added
 function signOKX(timestamp, method, requestPath, body = "") {
   const prehash = timestamp + method + requestPath + body;
   return CryptoJS.enc.Base64.stringify(
-    CryptoJS.HmacSHA256(prehash, 4248461B73F98E3CA9796190C1D9A9FC)
+    CryptoJS.HmacSHA256(prehash, 4248461B73F98E3CA9796190C1D9A9FC.toString())
   );
 }
+
+
+
+
+// ===== SIGN FUNCTION =====File gốc
+//function signOKX(timestamp, method, requestPath, body = "") {
+ // const prehash = timestamp + method + requestPath + body;
+  //return CryptoJS.enc.Base64.stringify(
+   // CryptoJS.HmacSHA256(prehash, 4248461B73F98E3CA9796190C1D9A9FC)
+ // );
+//}
+
+
 
 // ===== PLACE ORDER =====
 async function placeOrder(payload) {
