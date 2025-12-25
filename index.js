@@ -18,16 +18,10 @@ const OKX_BASE_URL = "https://www.okx.com";
 // ===== LOT CACHE =====
 const lotCache = {};
 
-// ===== HEALTH CHECK =====
-app.get("/", (req, res) => {
-  res.send("OKX Webhook Server is running");
-});
-
 // ===== SIGN =====
-function signOKX(timestamp, method, requestPath, body = "") {
-  const prehash = timestamp + method + requestPath + body;
+function signOKX(ts, method, path, body = "") {
   return CryptoJS.enc.Base64.stringify(
-    CryptoJS.HmacSHA256(prehash, OKX_API_SECRET)
+    CryptoJS.HmacSHA256(ts + method + path + body, OKX_API_SECRET)
   );
 }
 
@@ -37,72 +31,88 @@ async function getLotSize(instId) {
     return lotCache[instId];
   }
 
-  const url = `${OKX_BASE_URL}/api/v5/public/instruments?instType=SWAP&instId=${instId}`;
-  const res = await fetch(url);
+  const res = await fetch(
+    `${OKX_BASE_URL}/api/v5/public/instruments?instType=SWAP&instId=${instId}`
+  );
   const json = await res.json();
-
-  if (json.code !== "0" || !json.data?.length) {
-    throw new Error("Cannot fetch lot size");
-  }
 
   const lotSz = parseFloat(json.data[0].lotSz);
   const minSz = parseFloat(json.data[0].minSz);
 
   lotCache[instId] = { lotSz, minSz, ts: Date.now() };
   console.log(`Lot size loaded: ${instId} | lotSz=${lotSz} | minSz=${minSz}`);
-
   return lotCache[instId];
 }
 
-// ===== NORMALIZE QTY =====
 function normalizeQty(qty, lotSz, minSz) {
   let q = Math.floor(qty / lotSz) * lotSz;
   if (q < minSz) q = minSz;
   return q;
 }
 
-// ===== PLACE ORDER =====
-async function placeOrder(payload) {
-  const timestamp = new Date().toISOString();
+// ===== PLACE ENTRY =====
+async function placeEntry(payload) {
+  const ts = new Date().toISOString();
   const path = "/api/v5/trade/order";
 
   const { lotSz, minSz } = await getLotSize(payload.instId);
   const finalQty = normalizeQty(Number(payload.qty), lotSz, minSz);
 
-  // ===== MAP posSide (HEDGE MODE) =====
-  const posSide =
-    payload.side === "buy" ? "long" :
-    payload.side === "sell" ? "short" :
-    null;
-
-  if (!posSide) throw new Error("Invalid side");
-
-  console.log(
-    `Qty normalize: raw=${payload.qty} -> final=${finalQty} | posSide=${posSide}`
-  );
+  const posSide = payload.side === "buy" ? "long" : "short";
 
   const bodyObj = {
     instId: payload.instId,
-    tdMode: "cross",          // giữ cross
-    side: payload.side,       // buy / sell
-    posSide: posSide,         // BẮT BUỘC cho hedge mode
+    tdMode: "cross",
+    side: payload.side,
+    posSide,
     ordType: "market",
     sz: finalQty.toString()
   };
 
   const body = JSON.stringify(bodyObj);
 
-  const headers = {
-    "Content-Type": "application/json",
-    "OK-ACCESS-KEY": OKX_API_KEY,
-    "OK-ACCESS-SIGN": signOKX(timestamp, "POST", path, body),
-    "OK-ACCESS-TIMESTAMP": timestamp,
-    "OK-ACCESS-PASSPHRASE": OKX_API_PASSPHRASE
+  const res = await fetch(OKX_BASE_URL + path, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "OK-ACCESS-KEY": OKX_API_KEY,
+      "OK-ACCESS-SIGN": signOKX(ts, "POST", path, body),
+      "OK-ACCESS-TIMESTAMP": ts,
+      "OK-ACCESS-PASSPHRASE": OKX_API_PASSPHRASE
+    },
+    body
+  });
+
+  return { result: await res.json(), finalQty, posSide };
+}
+
+// ===== PLACE ALGO (TP or SL) =====
+async function placeAlgo({ instId, posSide, side, triggerPx, sz }) {
+  const ts = new Date().toISOString();
+  const path = "/api/v5/trade/order-algo";
+
+  const bodyObj = {
+    instId,
+    tdMode: "cross",
+    side,
+    posSide,
+    ordType: "conditional",
+    triggerPx: triggerPx.toString(),
+    orderPx: "-1",
+    sz: sz.toString()
   };
+
+  const body = JSON.stringify(bodyObj);
 
   const res = await fetch(OKX_BASE_URL + path, {
     method: "POST",
-    headers,
+    headers: {
+      "Content-Type": "application/json",
+      "OK-ACCESS-KEY": OKX_API_KEY,
+      "OK-ACCESS-SIGN": signOKX(ts, "POST", path, body),
+      "OK-ACCESS-TIMESTAMP": ts,
+      "OK-ACCESS-PASSPHRASE": OKX_API_PASSPHRASE
+    },
     body
   });
 
@@ -112,26 +122,51 @@ async function placeOrder(payload) {
 // ===== WEBHOOK =====
 app.post("/webhook", async (req, res) => {
   try {
-    const data = req.body;
-    console.log("Webhook received:", data);
+    const d = req.body;
+    console.log("Webhook:", d);
 
-    if (!data.secret || data.secret !== TV_SECRET) {
-      console.error("❌ Invalid secret");
+    if (d.secret !== TV_SECRET) {
       return res.status(401).json({ error: "Invalid secret" });
     }
 
-    const result = await placeOrder(data);
-    console.log("OKX result:", result);
+    // ===== ENTRY =====
+    const { result, finalQty, posSide } = await placeEntry(d);
+    console.log("ENTRY:", result);
 
     if (result.code !== "0") {
-      console.error("❌ OKX rejected order:", result);
+      return res.json({ ok: false, entry: result });
     }
 
-    res.json({ ok: true, result });
+    // ===== SL / TP (RDB1.2 STYLE – ATR BASED FROM PINE) =====
+    if (d.sl) {
+      const slSide = posSide === "long" ? "sell" : "buy";
+      const slRes = await placeAlgo({
+        instId: d.instId,
+        posSide,
+        side: slSide,
+        triggerPx: d.sl,
+        sz: finalQty
+      });
+      console.log("SL:", slRes);
+    }
 
-  } catch (err) {
-    console.error("❌ Server error:", err.message);
-    res.status(500).json({ error: err.message });
+    if (d.tp1) {
+      const tpSide = posSide === "long" ? "sell" : "buy";
+      const tpRes = await placeAlgo({
+        instId: d.instId,
+        posSide,
+        side: tpSide,
+        triggerPx: d.tp1,
+        sz: finalQty
+      });
+      console.log("TP1:", tpRes);
+    }
+
+    res.json({ ok: true });
+
+  } catch (e) {
+    console.error("ERROR:", e.message);
+    res.status(500).json({ error: e.message });
   }
 });
 
