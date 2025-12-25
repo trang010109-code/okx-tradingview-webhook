@@ -9,12 +9,14 @@ const PORT = process.env.PORT || 3000;
 
 // ===== ENV =====
 const TV_SECRET = process.env.TV_SECRET || "";
-
 const OKX_API_KEY = process.env.OKX_API_KEY || "";
 const OKX_API_SECRET = process.env.OKX_API_SECRET || "";
 const OKX_API_PASSPHRASE = process.env.OKX_API_PASSPHRASE || "";
 
 const OKX_BASE_URL = "https://www.okx.com";
+
+// ===== CACHE LOT SIZE =====
+const lotCache = {}; // instId -> { lotSz, minSz, ts }
 
 // ===== HEALTH CHECK =====
 app.get("/", (req, res) => {
@@ -29,18 +31,59 @@ function signOKX(timestamp, method, requestPath, body = "") {
   );
 }
 
+// ===== GET LOT SIZE =====
+async function getLotSize(instId) {
+  // cache 10 phút
+  if (lotCache[instId] && Date.now() - lotCache[instId].ts < 10 * 60 * 1000) {
+    return lotCache[instId];
+  }
+
+  const url = `${OKX_BASE_URL}/api/v5/public/instruments?instType=SWAP&instId=${instId}`;
+  const res = await fetch(url);
+  const json = await res.json();
+
+  if (json.code !== "0" || !json.data || json.data.length === 0) {
+    throw new Error("Cannot fetch lot size from OKX");
+  }
+
+  const lotSz = parseFloat(json.data[0].lotSz);
+  const minSz = parseFloat(json.data[0].minSz);
+
+  lotCache[instId] = {
+    lotSz,
+    minSz,
+    ts: Date.now()
+  };
+
+  console.log(`Lot size loaded: ${instId} | lotSz=${lotSz} | minSz=${minSz}`);
+  return lotCache[instId];
+}
+
+// ===== NORMALIZE QTY =====
+function normalizeQty(qty, lotSz, minSz) {
+  let q = Math.floor(qty / lotSz) * lotSz;
+  if (q < minSz) q = minSz;
+  return q;
+}
+
 // ===== PLACE ORDER =====
 async function placeOrder(payload) {
   const timestamp = new Date().toISOString();
   const path = "/api/v5/trade/order";
 
-  // ⚠️ OKX BẮT BUỘC sz LÀ STRING
+  const { lotSz, minSz } = await getLotSize(payload.instId);
+  const finalQty = normalizeQty(Number(payload.qty), lotSz, minSz);
+
+  console.log(
+    `Qty normalize: raw=${payload.qty} -> final=${finalQty} (lotSz=${lotSz})`
+  );
+
   const bodyObj = {
     instId: payload.instId,
-    tdMode: "cross",              // đổi isolated nếu bạn muốn
-    side: payload.side,           // buy / sell
+    tdMode: "cross",          // đổi isolated nếu cần
+    side: payload.side,       // buy / sell
     ordType: "market",
-    sz: payload.qty.toString()
+    sz: finalQty.toString()
   };
 
   const body = JSON.stringify(bodyObj);
@@ -69,25 +112,19 @@ app.post("/webhook", async (req, res) => {
     const data = req.body;
 
     console.log("Webhook received:", data);
-    console.log("Secret from TV:", data.secret);
-    console.log("Secret from ENV:", TV_SECRET);
 
-    // ---- SECRET CHECK ----
     if (!data.secret || data.secret !== TV_SECRET) {
       console.error("❌ Invalid secret");
       return res.status(401).json({ error: "Invalid secret" });
     }
 
-    // ---- BASIC VALIDATION ----
-    if (!data.instId || !data.side || !data.qty) {
-      console.error("❌ Missing required fields");
+    if (!data.instId || !data.side || data.qty == null) {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
     const result = await placeOrder(data);
     console.log("OKX result:", result);
 
-    // ---- OKX ERROR LOG ----
     if (result.code !== "0") {
       console.error("❌ OKX rejected order:", result);
     }
