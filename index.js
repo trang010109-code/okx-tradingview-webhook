@@ -15,8 +15,8 @@ const OKX_API_PASSPHRASE = process.env.OKX_API_PASSPHRASE || "";
 
 const OKX_BASE_URL = "https://www.okx.com";
 
-// ===== CACHE LOT SIZE =====
-const lotCache = {}; // instId -> { lotSz, minSz, ts }
+// ===== LOT CACHE =====
+const lotCache = {};
 
 // ===== HEALTH CHECK =====
 app.get("/", (req, res) => {
@@ -33,7 +33,6 @@ function signOKX(timestamp, method, requestPath, body = "") {
 
 // ===== GET LOT SIZE =====
 async function getLotSize(instId) {
-  // cache 10 phút
   if (lotCache[instId] && Date.now() - lotCache[instId].ts < 10 * 60 * 1000) {
     return lotCache[instId];
   }
@@ -42,20 +41,16 @@ async function getLotSize(instId) {
   const res = await fetch(url);
   const json = await res.json();
 
-  if (json.code !== "0" || !json.data || json.data.length === 0) {
-    throw new Error("Cannot fetch lot size from OKX");
+  if (json.code !== "0" || !json.data?.length) {
+    throw new Error("Cannot fetch lot size");
   }
 
   const lotSz = parseFloat(json.data[0].lotSz);
   const minSz = parseFloat(json.data[0].minSz);
 
-  lotCache[instId] = {
-    lotSz,
-    minSz,
-    ts: Date.now()
-  };
-
+  lotCache[instId] = { lotSz, minSz, ts: Date.now() };
   console.log(`Lot size loaded: ${instId} | lotSz=${lotSz} | minSz=${minSz}`);
+
   return lotCache[instId];
 }
 
@@ -74,14 +69,23 @@ async function placeOrder(payload) {
   const { lotSz, minSz } = await getLotSize(payload.instId);
   const finalQty = normalizeQty(Number(payload.qty), lotSz, minSz);
 
+  // ===== MAP posSide (HEDGE MODE) =====
+  const posSide =
+    payload.side === "buy" ? "long" :
+    payload.side === "sell" ? "short" :
+    null;
+
+  if (!posSide) throw new Error("Invalid side");
+
   console.log(
-    `Qty normalize: raw=${payload.qty} -> final=${finalQty} (lotSz=${lotSz})`
+    `Qty normalize: raw=${payload.qty} -> final=${finalQty} | posSide=${posSide}`
   );
 
   const bodyObj = {
     instId: payload.instId,
-    tdMode: "cross",          // đổi isolated nếu cần
+    tdMode: "cross",          // giữ cross
     side: payload.side,       // buy / sell
+    posSide: posSide,         // BẮT BUỘC cho hedge mode
     ordType: "market",
     sz: finalQty.toString()
   };
@@ -102,24 +106,18 @@ async function placeOrder(payload) {
     body
   });
 
-  const json = await res.json();
-  return json;
+  return await res.json();
 }
 
 // ===== WEBHOOK =====
 app.post("/webhook", async (req, res) => {
   try {
     const data = req.body;
-
     console.log("Webhook received:", data);
 
     if (!data.secret || data.secret !== TV_SECRET) {
       console.error("❌ Invalid secret");
       return res.status(401).json({ error: "Invalid secret" });
-    }
-
-    if (!data.instId || !data.side || data.qty == null) {
-      return res.status(400).json({ error: "Missing required fields" });
     }
 
     const result = await placeOrder(data);
@@ -132,7 +130,7 @@ app.post("/webhook", async (req, res) => {
     res.json({ ok: true, result });
 
   } catch (err) {
-    console.error("❌ Server error:", err);
+    console.error("❌ Server error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
