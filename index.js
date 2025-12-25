@@ -7,7 +7,7 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// ===== ENV =====
+// ================= ENV =================
 const TV_SECRET = process.env.TV_SECRET || "";
 const OKX_API_KEY = process.env.OKX_API_KEY || "";
 const OKX_API_SECRET = process.env.OKX_API_SECRET || "";
@@ -15,17 +15,17 @@ const OKX_API_PASSPHRASE = process.env.OKX_API_PASSPHRASE || "";
 
 const OKX_BASE_URL = "https://www.okx.com";
 
-// ===== LOT CACHE =====
+// ================= LOT CACHE =================
 const lotCache = {};
 
-// ===== SIGN =====
+// ================= SIGN =================
 function signOKX(ts, method, path, body = "") {
   return CryptoJS.enc.Base64.stringify(
     CryptoJS.HmacSHA256(ts + method + path + body, OKX_API_SECRET)
   );
 }
 
-// ===== GET LOT SIZE =====
+// ================= GET LOT SIZE =================
 async function getLotSize(instId) {
   if (lotCache[instId] && Date.now() - lotCache[instId].ts < 10 * 60 * 1000) {
     return lotCache[instId];
@@ -35,6 +35,10 @@ async function getLotSize(instId) {
     `${OKX_BASE_URL}/api/v5/public/instruments?instType=SWAP&instId=${instId}`
   );
   const json = await res.json();
+
+  if (json.code !== "0" || !json.data?.length) {
+    throw new Error("Cannot fetch lot size");
+  }
 
   const lotSz = parseFloat(json.data[0].lotSz);
   const minSz = parseFloat(json.data[0].minSz);
@@ -51,7 +55,7 @@ function normalizeQty(qty, lotSz, minSz) {
   return q;
 }
 
-// ===== ENTRY =====
+// ================= PLACE ENTRY =================
 async function placeEntry(payload) {
   const ts = new Date().toISOString();
   const path = "/api/v5/trade/order";
@@ -87,7 +91,7 @@ async function placeEntry(payload) {
   return { result: await res.json(), finalQty, posSide };
 }
 
-// ===== STOP LOSS ALGO =====
+// ================= STOP LOSS ALGO =================
 async function placeSL({ instId, posSide, slPx, sz }) {
   const ts = new Date().toISOString();
   const path = "/api/v5/trade/order-algo";
@@ -101,7 +105,7 @@ async function placeSL({ instId, posSide, slPx, sz }) {
     posSide,
     ordType: "conditional",
     slTriggerPx: slPx.toString(),
-    slOrderPx: "-1",
+    slOrdPx: "-1", // MARKET
     sz: sz.toString()
   };
 
@@ -122,7 +126,7 @@ async function placeSL({ instId, posSide, slPx, sz }) {
   return await res.json();
 }
 
-// ===== TAKE PROFIT ALGO =====
+// ================= TAKE PROFIT ALGO =================
 async function placeTP({ instId, posSide, tpPx, sz }) {
   const ts = new Date().toISOString();
   const path = "/api/v5/trade/order-algo";
@@ -136,7 +140,7 @@ async function placeTP({ instId, posSide, tpPx, sz }) {
     posSide,
     ordType: "conditional",
     tpTriggerPx: tpPx.toString(),
-    tpOrderPx: "-1",
+    tpOrdPx: "-1", // MARKET
     sz: sz.toString()
   };
 
@@ -157,7 +161,7 @@ async function placeTP({ instId, posSide, tpPx, sz }) {
   return await res.json();
 }
 
-// ===== WEBHOOK =====
+// ================= WEBHOOK =================
 app.post("/webhook", async (req, res) => {
   try {
     const d = req.body;
