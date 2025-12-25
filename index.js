@@ -67,7 +67,8 @@ app.post("/webhook", async (req, res) => {
     console.log("Webhook received:", data);
 
     // 1. Check secret
-    if (data.secret !== TV_SECRET) {
+    if (data.secret !== okx_phong_2025
+) {
       return res.status(401).json({ error: "Invalid secret" });
     }
 
